@@ -1,0 +1,19 @@
+// FIRESTORE SECURITY RULES
+// Only the two email addresses listed here can read or change your plan.
+//
+// Copy this into Firebase: Firestore Database -> Rules -> Publish.
+// Type your real emails IN FIREBASE, not in this file, because this
+// file is uploaded to GitHub where anyone can read it.
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if request.auth != null
+        && request.auth.token.email in [
+          'your-email@example.com',
+          'partner-email@example.com'
+        ];
+    }
+  }
+}
