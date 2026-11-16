@@ -101,6 +101,7 @@ const FORMS = {
       { key: 'budget',   label: 'Total budget', type: 'money', half: true },
       { key: 'venue',    label: 'Venue', type: 'text' },
       { key: 'city',     label: 'City', type: 'text' },
+      { key: 'cover',    label: 'Cover photo link (optional, starts with https://)', type: 'url' },
     ],
   },
 };

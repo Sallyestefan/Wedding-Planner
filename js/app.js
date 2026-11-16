@@ -229,71 +229,152 @@ function loadingHTML(what) {
   return '<div class="list"><div class="empty">Loading your ' + what + '…</div></div>';
 }
 
+// Open tasks in the order to tackle them: dated ones first (soonest
+// first), then by how far out from the wedding they belong.
+function openTasksInOrder() {
+  const tfIndex = t => { const i = TIMEFRAMES.indexOf(t.timeframe || TIMEFRAMES[0]); return i < 0 ? TIMEFRAMES.length : i; };
+  return state.data.tasks.filter(t => !t.done).sort((a, b) =>
+    (a.due ? 0 : 1) - (b.due ? 0 : 1) || (a.due || '').localeCompare(b.due || '') || tfIndex(a) - tfIndex(b) || (a.title || '').localeCompare(b.title || ''));
+}
+
+// A ring chart drawn as SVG. segs: [{ n, color }]
+function donutSVG(segs, total) {
+  const r = 52, c = 2 * Math.PI * r;
+  let off = 0;
+  const arcs = total > 0 ? segs.filter(s => s.n > 0).map(s => {
+    const len = (s.n / total) * c;
+    const arc = '<circle r="' + r + '" cx="64" cy="64" fill="none" style="stroke:' + s.color + '" stroke-width="13" stroke-dasharray="' + len.toFixed(2) + ' ' + (c - len).toFixed(2) + '" stroke-dashoffset="' + (-off).toFixed(2) + '"/>';
+    off += len;
+    return arc;
+  }).join('') : '';
+  return '<svg class="donut" viewBox="0 0 128 128" aria-hidden="true"><g transform="rotate(-90 64 64)">' +
+    '<circle r="' + r + '" cx="64" cy="64" fill="none" style="stroke:var(--line)" stroke-width="13"/>' + arcs + '</g></svg>';
+}
+
+function cardHead(title, linkLabel, goto, extra) {
+  return '<div class="card-head"><h3>' + title + '</h3>' +
+    (linkLabel ? '<button class="link" type="button" ' + (goto ? 'data-goto="' + goto + '"' : extra) + '>' + linkLabel + '</button>' : '') + '</div>';
+}
+
 function renderOverview() {
   const s = settings();
   const names = (s.partner1 || s.partner2)
     ? esc(s.partner1 || '…') + '<span class="amp">&amp;</span>' + esc(s.partner2 || '…')
     : 'Your names here';
   const days = daysFromToday(s.date);
+  const pct = (a, z) => z > 0 ? Math.max(0, Math.min(100, Math.round((a / z) * 100))) : 0;
+
+  // ---- Banner ----
+  const meta = [s.date ? invitationDate(s.date) : 'Add your date in Wedding details', [s.venue, s.city].filter(Boolean).join(', ')].filter(Boolean).join(' — ');
+  const count = days === null ? 'Your story starts here'
+    : days > 0 ? days + (days === 1 ? ' day remaining' : ' days remaining')
+    : days === 0 ? 'Today’s the day'
+    : 'Married ' + Math.abs(days) + (days === -1 ? ' day' : ' days');
+  const cover = /^https:\/\//i.test(s.cover || '') ? '<img src="' + esc(s.cover) + '" alt="" onerror="this.remove()">' : '';
+  const banner = '<div class="banner">' + cover +
+    '<button class="banner-edit" type="button" data-action="edit-settings">' + (cover ? 'Edit details' : 'Add a cover photo') + '</button>' +
+    '<div class="banner-text"><div><h1 class="hero-names">' + names + '</h1><p class="hero-meta">' + esc(meta) + '</p></div>' +
+    '<p class="hero-count num">' + esc(count) + '</p></div></div>';
+
+  // ---- Guests ----
+  const sum = list => list.reduce((n, x) => n + (num(x.party) || 1), 0);
+  const gl = state.data.guests;
+  const gSegs = [
+    { label: 'Attending',      rsvp: 'Attending', color: 'var(--c-yes)',  n: sum(gl.filter(x => x.rsvp === 'Attending')) },
+    { label: 'Awaiting reply', rsvp: 'Invited',   color: 'var(--c-wait)', n: sum(gl.filter(x => x.rsvp === 'Invited' || x.rsvp === 'Save-the-date sent')) },
+    { label: 'Declined',       rsvp: 'Declined',  color: 'var(--c-no)',   n: sum(gl.filter(x => x.rsvp === 'Declined')) },
+    { label: 'Not invited yet', rsvp: 'Not sent yet', color: 'var(--c-new)', n: sum(gl.filter(x => !x.rsvp || x.rsvp === 'Not sent yet')) },
+  ];
+  const gAll = sum(gl);
+  const guestsCard = '<div class="card">' + cardHead('The status of our guests', 'See all →', 'guests') +
+    (gl.length
+      ? '<div class="guest-chart"><div class="donut-wrap">' + donutSVG(gSegs, gAll) +
+          '<div class="donut-label"><b class="num">' + gAll + '</b><span>' + (gAll === 1 ? 'Guest' : 'Guests') + '</span></div></div>' +
+        '<div class="legend">' + gSegs.map(x => '<button class="legend-row" type="button" data-goto="guests" data-gfilter-goto="' + esc(x.rsvp) + '">' +
+          '<span class="dot" style="background:' + x.color + '"></span><span>' + x.label + '</span><b class="num">' + x.n + '</b></button>').join('') + '</div></div>'
+      : '<div class="empty">No guests yet. Add households on the Guests tab and you’ll see who has replied here.<button class="btn btn-primary" type="button" data-action="new" data-col="guests">Add a guest</button></div>') +
+    '</div>';
+
+  // ---- Budget ----
   const b = budgetTotals();
+  const base = b.total || b.committed;
+  const over = b.total > 0 && b.committed > b.total;
+  const cats = {};
+  b.booked.forEach(v => { const k = v.category || 'Other'; cats[k] = (cats[k] || 0) + num(v.price); });
+  const extra = state.data.expenses.reduce((n, e) => n + num(e.cost), 0);
+  if (extra) cats['Other expenses'] = (cats['Other expenses'] || 0) + extra;
+  const top = Object.entries(cats).filter(([, v]) => v > 0).sort((x, y) => y[1] - x[1]).slice(0, 5);
+  const budgetCard = '<div class="card">' + cardHead('Budget', 'See all expenses →', 'budget') +
+    '<div class="money-pair">' +
+      '<div><span>Total budget</span><b class="num">' + (b.total ? money(b.total) : '–') + '</b></div>' +
+      '<div><span>' + (over ? 'Over budget' : 'Available budget') + '</span><b class="num" style="color:' + (over ? 'var(--bad)' : 'var(--good)') + '">' +
+        (b.total ? money(Math.abs(b.left)) : '–') + '</b></div></div>' +
+    '<div class="stack-bar' + (over ? ' over' : '') + '"><span class="paid" style="width:' + pct(Math.min(b.paid, b.committed || b.paid), base) + '%"></span>' +
+      '<span class="committed" style="width:' + pct(Math.max(0, b.committed - b.paid), base) + '%"></span></div>' +
+    '<div class="bar-legend num"><span><span class="dot" style="background:var(--ink)"></span>' + money(b.paid) + ' · Paid</span>' +
+      '<span><span class="dot" style="background:color-mix(in srgb, var(--ink) 35%, var(--line))"></span>' + money(b.committed) + ' · Committed</span>' +
+      '<span class="push">' + (b.total ? pct(b.committed, b.total) + '% used' : '<button class="link" type="button" data-action="edit-settings">Set a total budget</button>') + '</span></div>' +
+    (top.length
+      ? '<div><h3 style="margin-bottom:6px">Top categories</h3>' + top.map(([k, v]) =>
+          '<div class="cat-row"><span>' + esc(k) + '</span><div class="thin"><span style="width:' + pct(v, base) + '%"></span></div><em class="num">' + money(v) + '</em></div>').join('') + '</div>'
+      : '<p class="small muted">Vendors you mark as Booked show up here by category.</p>') +
+    '</div>';
+
+  // ---- Top priorities ----
   const tasks = state.data.tasks;
   const done = tasks.filter(t => t.done).length;
-  const g = guestTotals();
-  const pct = (a, z) => z > 0 ? Math.min(100, Math.round((a / z) * 100)) : 0;
+  const open = openTasksInOrder();
+  const first = open[0];
+  const next = open.slice(1, 5);
+  const taskMeta = t => [t.due ? whenLabel(t.due) : '', t.due && daysFromToday(t.due) >= 14 ? '' : (t.due ? shortDate(t.due) : ''), t.timeframe || ''].filter(Boolean);
+  const prioritiesCard = '<div class="card">' + cardHead('Top priorities', 'See all tasks →', 'checklist') +
+    (tasks.length
+      ? '<div class="progress-line"><div class="meter"><span style="width:' + pct(done, tasks.length) + '%"></span></div><span class="num">' + done + ' / ' + tasks.length + ' done</span></div>' +
+        (first
+          ? '<div class="featured"><h3>Do this first</h3><p class="featured-title">' + esc(first.title) + '</p>' +
+              '<p class="small muted">' + taskMeta(first).map(esc).join(' · ') + (first.due && daysFromToday(first.due) < 0 ? ' ' + duePill(first.due) : '') + '</p>' +
+              '<div class="featured-foot"><button class="btn btn-outline" type="button" data-action="complete-task" data-col="tasks" data-id="' + esc(first.id) + '">✓ Mark as done</button></div></div>'
+          : '<div class="featured"><p class="featured-title">Everything is done.</p><p class="small muted">Congratulations! Enjoy the day.</p></div>') +
+        (next.length
+          ? '<div><h3>Up next</h3><div class="list">' + next.map(t => '<div class="task">' +
+              '<input type="checkbox" id="ov-task-' + esc(t.id) + '" data-toggle="' + esc(t.id) + '" aria-label="Mark done">' +
+              '<label for="ov-task-' + esc(t.id) + '"><span class="task-title">' + esc(t.title) + '</span><br><span class="small muted">' + taskMeta(t).map(esc).join(' · ') + '</span></label>' +
+              '<button class="task-edit" type="button" data-action="edit" data-col="tasks" data-id="' + esc(t.id) + '">Edit</button></div>').join('') + '</div></div>'
+          : '')
+      : '<div class="empty">No tasks yet. Start with a standard wedding checklist of ' + STARTER_TASKS.length + ' tasks.<button class="btn btn-primary" type="button" data-action="starter-tasks">Add the starter checklist</button></div>') +
+    '</div>';
 
-  let countdown = '';
-  if (days !== null) {
-    countdown = days > 0 ? '<div class="countdown"><b class="num">' + days + '</b><span class="muted">' + (days === 1 ? 'day to go' : 'days to go') + '</span></div>'
-      : days === 0 ? '<div class="countdown"><b>Today</b><span class="muted">is the day</span></div>'
-      : '<div class="countdown"><span class="muted">Married ' + Math.abs(days) + ' days</span></div>';
-  }
-
-  // "Coming up": open tasks, payments, meetings and follow-ups with dates
+  // ---- Payments and meetings ----
   const upcoming = [];
-  tasks.filter(t => !t.done && t.due).forEach(t => upcoming.push({ date: t.due, label: t.title, kind: 'Task', action: 'edit', col: 'tasks', id: t.id }));
   state.data.vendors.forEach(v => {
-    if (v.dueDate && num(v.price) - num(v.paid) > 0) upcoming.push({ date: v.dueDate, label: 'Pay ' + v.name + ' · ' + money(num(v.price) - num(v.paid)) + ' left', kind: 'Payment', action: 'vendor', id: v.id });
-    if (v.meetDate && daysFromToday(v.meetDate) >= 0) upcoming.push({ date: v.meetDate, label: 'Meet ' + v.name, kind: 'Meeting', action: 'vendor', id: v.id });
+    if (v.dueDate && num(v.price) - num(v.paid) > 0) upcoming.push({ date: v.dueDate, label: 'Pay ' + v.name + ' · ' + money(num(v.price) - num(v.paid)) + ' left', kind: 'Payment', id: v.id });
+    if (v.meetDate && daysFromToday(v.meetDate) >= 0) upcoming.push({ date: v.meetDate, label: 'Meet ' + v.name, kind: 'Meeting', id: v.id });
   });
   state.data.calls.forEach(c => {
-    if (c.followUp && daysFromToday(c.followUp) >= -7) upcoming.push({ date: c.followUp, label: 'Follow up with ' + vendorName(c.vendorId), kind: 'Follow-up', action: 'vendor', id: c.vendorId });
+    if (c.followUp && daysFromToday(c.followUp) >= -7) upcoming.push({ date: c.followUp, label: 'Follow up with ' + vendorName(c.vendorId), kind: 'Follow-up', id: c.vendorId });
   });
   upcoming.sort((a, b) => a.date.localeCompare(b.date));
+  const upcomingCard = '<div class="card">' + cardHead('Payments & meetings', 'Vendors →', 'vendors') +
+    '<div class="list">' + (upcoming.length
+      ? upcoming.slice(0, 5).map(u => '<button class="row" type="button" data-action="vendor" data-id="' + esc(u.id) + '">' +
+          '<span class="row-title">' + esc(u.label) + '</span><span class="row-right">' + duePill(u.date) + '</span>' +
+          '<span class="row-meta"><span>' + u.kind + '</span><span>' + esc(shortDate(u.date)) + '</span></span></button>').join('')
+      : '<div class="empty">Add payment and meeting dates to your vendors and they’ll show up here.</div>') + '</div></div>';
 
-  const upcomingHTML = upcoming.length
-    ? upcoming.slice(0, 6).map(u => '<button class="row" type="button" data-action="' + u.action + '" data-col="' + (u.col || '') + '" data-id="' + esc(u.id) + '">' +
-        '<span class="row-title">' + esc(u.label) + '</span><span class="row-right">' + duePill(u.date) + '</span>' +
-        '<span class="row-meta"><span>' + u.kind + '</span><span>' + esc(shortDate(u.date)) + '</span></span></button>').join('')
-    : '<div class="empty">Nothing dated yet. Add due dates to tasks, or payment and meeting dates to vendors, and they will show up here.</div>';
-
+  // ---- Recent conversations ----
   const recent = [...state.data.calls].sort((a, b) => (b.date || '').localeCompare(a.date || '')).slice(0, 3);
-  const recentHTML = recent.length
-    ? recent.map(c => '<button class="row" type="button" data-action="vendor" data-id="' + esc(c.vendorId) + '">' +
-        '<span class="row-title">' + esc(vendorName(c.vendorId)) + '</span><span class="row-right muted">' + esc(shortDate(c.date)) + '</span>' +
-        '<span class="row-meta"><span>' + esc(c.method || '') + '</span><span>' + esc((c.summary || '').slice(0, 90)) + ((c.summary || '').length > 90 ? '…' : '') + '</span></span></button>').join('')
-    : '<div class="empty">Log calls, texts and meetings with vendors so you always know what was agreed.</div>';
+  const recentCard = '<div class="card">' + cardHead('Recent conversations', 'Log one →', null, 'data-action="new" data-col="calls"') +
+    '<div class="list">' + (recent.length
+      ? recent.map(c => '<button class="row" type="button" data-action="vendor" data-id="' + esc(c.vendorId) + '">' +
+          '<span class="row-title">' + esc(vendorName(c.vendorId)) + '</span><span class="row-right muted">' + esc(shortDate(c.date)) + '</span>' +
+          '<span class="row-meta"><span>' + esc(c.method || '') + '</span><span>' + esc((c.summary || '').slice(0, 90)) + ((c.summary || '').length > 90 ? '…' : '') + '</span></span></button>').join('')
+      : '<div class="empty">Log calls, texts and meetings with vendors so you always know what was agreed.</div>') + '</div></div>';
 
-  return '<section class="view">' +
-    '<div class="hero">' +
-      '<h1 class="hero-names">' + names + '</h1>' +
-      (s.date ? '<p class="hero-date">' + esc(invitationDate(s.date)) + '</p>' : '<p class="hero-date">Add your date in Wedding details</p>') +
-      ((s.venue || s.city) ? '<p class="hero-venue">' + esc([s.venue, s.city].filter(Boolean).join(' · ')) + '</p>' : '') +
-      countdown +
-    '</div>' +
-    '<div class="stats">' +
-      '<button class="stat" type="button" data-goto="budget"><h3>Budget</h3><span class="stat-value num">' + money(b.committed) + '</span>' +
-        '<span class="stat-sub num">' + (b.total ? 'committed of ' + money(b.total) : 'committed · set a total budget') + '</span>' +
-        '<div class="meter' + (b.total && b.committed > b.total ? ' over' : '') + '"><span style="width:' + pct(b.committed, b.total) + '%"></span></div></button>' +
-      '<button class="stat" type="button" data-goto="checklist"><h3>Checklist</h3><span class="stat-value num">' + done + ' of ' + tasks.length + '</span>' +
-        '<span class="stat-sub">tasks done</span><div class="meter"><span style="width:' + pct(done, tasks.length) + '%"></span></div></button>' +
-      '<button class="stat" type="button" data-goto="guests"><h3>Guests</h3><span class="stat-value num">' + g.attending + ' attending</span>' +
-        '<span class="stat-sub num">' + g.waiting + ' awaiting reply · ' + g.all + ' on list</span><div class="meter"><span style="width:' + pct(g.attending + g.declined, g.all) + '%"></span></div></button>' +
-    '</div>' +
-    '<div class="section"><div class="view-head"><h2>Coming up</h2></div><div class="list">' + upcomingHTML + '</div></div>' +
-    '<div class="section"><div class="view-head"><h2>Recent conversations</h2>' +
-      '<button class="btn btn-primary" type="button" data-action="new" data-col="calls">Log a conversation</button></div>' +
-      '<div class="list">' + recentHTML + '</div></div>' +
-  '</section>';
+  return '<section class="view view-overview">' + banner +
+    '<div class="dash">' +
+      '<div class="dash-col">' + guestsCard + prioritiesCard + '</div>' +
+      '<div class="dash-col">' + budgetCard + upcomingCard + recentCard + '</div>' +
+    '</div></section>';
 }
 
 function renderVendors() {
@@ -426,9 +507,24 @@ function renderSignIn() {
     '</form></section>';
 }
 
+// The couple card and counts in the sidebar (computers only).
+function renderSidebar(s) {
+  const initial = n => (n || '').trim().charAt(0).toUpperCase();
+  $('#couple-names').textContent = (s.partner1 || s.partner2) ? [s.partner1, s.partner2].filter(Boolean).join(' & ') : 'Our wedding';
+  $('#couple-initials').textContent = (s.partner1 && s.partner2) ? initial(s.partner1) + '&' + initial(s.partner2) : (initial(s.partner1 || s.partner2) || '♡');
+  const days = daysFromToday(s.date);
+  $('#couple-days').textContent = days === null ? 'Add your date' : days > 0 ? days + (days === 1 ? ' day to go' : ' days to go') : days === 0 ? 'Today’s the day' : 'Married';
+  const g = guestTotals().all;
+  const open = state.data.tasks.filter(t => !t.done).length;
+  $('#count-guests').textContent = g || '';
+  $('#count-vendors').textContent = state.data.vendors.length || '';
+  $('#count-tasks').textContent = open ? open + ' left' : '';
+}
+
 function render() {
   const signedOut = Store.mode === 'online' && !state.user;
-  $('.tabs').hidden = signedOut;
+  document.body.classList.toggle('signed-out', signedOut);
+  $('#sidebar').hidden = signedOut;
   $('#details-btn').hidden = signedOut;
   if (signedOut) {
     // Don't redraw the sign-in form while someone is typing in it.
@@ -440,6 +536,7 @@ function render() {
   $('#view').innerHTML = VIEWS[state.tab]();
   const s = settings();
   $('#monogram').textContent = (s.partner1 && s.partner2) ? s.partner1 + ' & ' + s.partner2 : 'Our Wedding Book';
+  renderSidebar(s);
   $('#footer-note').textContent = Store.mode === 'device'
     ? 'Firebase isn’t connected yet, so this saves in this browser only. See README.md to set it up.'
     : 'Saved online · syncs across your devices · signed in as ' + state.user.email;
@@ -585,7 +682,10 @@ document.addEventListener('click', async e => {
   const tab = e.target.closest('[data-tab]');
   if (tab) { state.tab = tab.dataset.tab; render(); window.scrollTo(0, 0); return; }
   const go = e.target.closest('[data-goto]');
-  if (go) { state.tab = go.dataset.goto; render(); window.scrollTo(0, 0); return; }
+  if (go) {
+    if (go.dataset.gfilterGoto) state.guestFilter = go.dataset.gfilterGoto;
+    state.tab = go.dataset.goto; render(); window.scrollTo(0, 0); return;
+  }
   const vf = e.target.closest('[data-vfilter]');
   if (vf) { state.vendorFilter = vf.dataset.vfilter; render(); return; }
   const gf = e.target.closest('[data-gfilter]');
@@ -608,6 +708,12 @@ document.addEventListener('click', async e => {
   else if (action === 'edit') { const item = find(); if (item) openForm(col, item); }
   else if (action === 'vendor') { if (state.data.vendors.some(v => v.id === id)) openVendor(id); }
   else if (action === 'hide-done') { state.hideDone = !state.hideDone; render(); }
+  else if (action === 'complete-task') {
+    const task = find(); if (!task) return;
+    const { id: _, ...rest } = task;
+    try { await Store.save('tasks', id, { ...rest, done: true }); toast('Done. Nice work!'); }
+    catch (err) { saveError(err); }
+  }
   else if (action === 'starter-tasks') {
     const created = new Date().toISOString();
     STARTER_TASKS.forEach(([timeframe, title], i) =>
